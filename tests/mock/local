@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# One mock for every external command of test_local.sh (linked as gh, uname, launchctl, ...):
+# logs [name, cwd, args...] and acts by name.
+name=${0##*/}
+printf '%s\0' "$name" "$PWD" "$@" | jq -sRc 'split("\u0000")[:-1]' >>"$TEST_LOG"
+
+case $name in
+uname) [[ $1 == -s ]] && echo Darwin || echo arm64 ;;
+scutil) echo host ;;
+launchctl)
+  # "list LABEL": running when the label is in TEST_RUNNING
+  if [[ $1 == list ]]; then
+    [[ ,${TEST_RUNNING:-}, == *",$2,"* ]] || exit 113
+    printf '{\n\t"Label" = "%s";\n\t"PID" = 42;\n};\n' "$2"
+  fi
+  ;;
+curl)
+  while (($#)); do
+    [[ $1 == -o ]] && : >"$2"
+    shift
+  done
+  ;;
+tar) "$TEST_MOCKS/make-runner" "$PWD" "$TEST_LATEST" ;; # unpacking writes the latest runner scripts
+gh)
+  if [[ $1 == auth && $2 == status ]]; then
+    :
+  elif [[ $* == *repos/actions/runner/releases/latest* ]]; then
+    echo "$TEST_LATEST"
+  elif [[ $1 == api && $2 == -X && $3 == POST ]]; then
+    [[ ${TEST_SCENARIO:-} == token-failure ]] && { echo "HTTP 403" >&2; exit 1; }
+    echo TOKEN
+  elif [[ $1 == api ]]; then
+    [[ ${TEST_SCENARIO:-} == api-failure ]] && { echo "HTTP 403" >&2; exit 1; }
+    prev=
+    for arg in "$@"; do
+      [[ $prev == --jq ]] && exec jq -r "$arg" <<'JSON'
+{"runners": [{"name": "host-dotfiles", "status": "online", "busy": true},
+             {"name": "host-app", "status": "offline", "busy": false}]}
+JSON
+      prev=$arg
+    done
+    exit 2
+  else
+    echo "mock gh: unexpected command: $*" >&2
+    exit 2
+  fi
+  ;;
+*) echo "mock: unknown command $name" >&2; exit 2 ;;
+esac

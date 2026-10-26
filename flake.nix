@@ -48,16 +48,13 @@
           default =
             pkgs.runCommand "gh-runners-tests"
               {
-                nativeBuildInputs = [
-                  pkgs.jq
-                  pkgs.python3
-                ];
+                nativeBuildInputs = [ pkgs.jq ];
               }
               ''
                 cp -r ${self}/. src && chmod -R u+w src
                 patchShebangs src
-                python3 src/tests/test_gh_runners.py
-                python3 src/tests/test_local.py
+                bash src/tests/test_gh_runners.sh
+                bash src/tests/test_local.sh
                 touch $out
               '';
           package = self.packages.${system}.default;

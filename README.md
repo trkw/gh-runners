@@ -125,9 +125,9 @@ xdg.configFile."gh-runners/repos".text = ''
 ## Development
 
 ```sh
-shellcheck gh-runners
-python3 tests/test_gh_runners.py   # mock gh; needs jq
-python3 tests/test_local.py        # mock gh / launchctl / runner scripts
+shellcheck -x gh-runners tests/test_*.sh tests/mock/*
+bash tests/test_gh_runners.sh   # mock gh; needs jq
+bash tests/test_local.sh        # mock gh / launchctl / runner scripts
 nix flake check
 ```
 
