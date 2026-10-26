@@ -150,12 +150,14 @@ test_add_registers_new_runner() {
   [[ -e $d/.runner ]] || fail "$d/.runner is missing"
   eq "$(steps config.sh)" --unattended
   eq "$(steps svc.sh)" $'install\nstart\nstatus'
+  has "$out" "Registered org-new on org/new" # default name: <owner>-<repo>
   has "$(calls)" "[\"gh\",\"$d\",\"api\",\"-X\",\"POST\",\"repos/org/new/actions/runners/registration-token\",\"--jq\",\".token\"]"
 }
 
 test_add_replaces_existing_registration() {
-  run setup --repo dots
+  run setup --repo dots --name mine
   ok
+  has "$out" "Registered mine on me/dotfiles"
   eq "$(steps config.sh)" $'remove\n--unattended'
   eq "$(steps tar 1)" "$DOTS" # old version upgraded
 }

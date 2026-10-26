@@ -1,3 +1,6 @@
+
+To rename an existing runner, run `add` again for its repository (with `--name`, or without it for the default name): the old registration in `DIR` is replaced. Pass `--labels` again if workflows rely on labels other than the defaults.
+Registration uses `--replace`, so a second Mac registering the same repository needs its own `--name`; with the default name it would take over the first one.
 # gh-runners
 
 A [GitHub CLI](https://cli.github.com/) extension for self-hosted GitHub Actions runners.
@@ -84,9 +87,12 @@ Registration tokens are fetched with `gh api` each time and are never stored.
 | Option | Default |
 | --- | --- |
 | `TARGET` | the current repository |
-| `--name` | `<LocalHostName>-<repo name>` |
+| `--name` | `<owner>-<repo name>` (e.g. `octo-org/app` → `octo-org-app`) |
 | `--dir` | `~/actions-runner-<repo name>` |
 | `--labels` | `<LocalHostName>` (plus the default `self-hosted`, `macOS`, `ARM64`) |
+
+To rename an existing runner, run `add` again for its repository (with `--name`, or without it for the default name): the registration in `DIR` is replaced.
+Pass `--labels` again if workflows rely on labels other than the defaults.
 
 The account needs admin access to the repository.
 
