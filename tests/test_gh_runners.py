@@ -50,7 +50,7 @@ else:
 '''
 
 CONFIG = """# test aliases
-corp  example/corp
+corp  example/corp  # inline comment
 dots  example/dots
 bad   forbidden/repo
 """
@@ -165,6 +165,8 @@ class GhRunnersTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid repository for alias corp", result.stderr)
         self.assertEqual(self.calls(), [])
+        result = self.run_cli("list", "other/repo")  # an explicit repository ignores the config
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_missing_config_all(self):
         result = self.run_cli("list", "all", GH_RUNNERS_CONFIG=str(self.path / "none"))

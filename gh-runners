@@ -28,9 +28,10 @@ export GH_PAGER=cat GH_PROMPT_DISABLED=1 NO_COLOR=1
 # Print "ALIAS<TAB>OWNER/REPO" for each valid config line.
 aliases() {
   [ -f "$config" ] || return 0
-  local name repo extra
-  while read -r name repo extra || [ -n "$name" ]; do
-    case "$name" in '' | '#'*) continue ;; esac
+  local line name repo extra
+  while IFS= read -r line || [ -n "$line" ]; do
+    read -r name repo extra <<<"${line%%#*}"
+    [ -n "$name" ] || continue
     [ -z "$extra" ] || die "Invalid line in $config: $name $repo $extra"
     [[ "$repo" =~ $repo_re ]] || die "Invalid repository for alias $name in $config: $repo"
     printf '%s\t%s\n' "$name" "$repo"
@@ -39,9 +40,12 @@ aliases() {
 
 # Resolve TARGET into the global array "repos" before any request is made.
 resolve() {
-  local target=${1:-} line table
+  local target=${1:-} line table=''
   repos=()
-  table=$(aliases) || exit 1
+  # Read the config only when the target needs it, so a broken file never blocks OWNER/REPO.
+  if [ "$target" = all ] || { [ -n "$target" ] && [[ "$target" != */* ]]; }; then
+    table=$(aliases) || exit 1
+  fi
   if [ -z "$target" ]; then
     target=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) ||
       die 'Not in a GitHub repository; pass OWNER/REPO, an alias or "all"'
