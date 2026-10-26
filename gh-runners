@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# gh runners: look at self-hosted GitHub Actions runners and (re)register one on this Mac.
+# list / runs only read the GitHub API. setup is the only command that changes anything.
+set -euo pipefail
+
+usage() {
+  cat <<'HELP'
+Usage: gh runners [list] [TARGET]          runners: name / status / busy / labels
+       gh runners runs [TARGET] [LIMIT]    recent workflow runs (default 10, max 100)
+       gh runners setup [--repo TARGET] [--name NAME] [--dir DIR] [--labels LABELS]
+                                           (re)register a runner on this Mac as a launchd service
+       gh runners aliases                  show the configured aliases
+
+TARGET is OWNER/REPO, an alias from the config file, or "all" (every alias).
+Without TARGET the current repository is used (GH_REPO or the git remote).
+
+Config: ${GH_RUNNERS_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/gh-runners/repos}
+  one "ALIAS OWNER/REPO" per line; "#" starts a comment.
+HELP
+}
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+config=${GH_RUNNERS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-runners/repos}
+repo_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+export GH_PAGER=cat GH_PROMPT_DISABLED=1 NO_COLOR=1
+
+# Print "ALIAS<TAB>OWNER/REPO" for each valid config line.
+aliases() {
+  [ -f "$config" ] || return 0
+  local line name repo extra
+  while IFS= read -r line || [ -n "$line" ]; do
+    read -r name repo extra <<<"${line%%#*}"
+    [ -n "$name" ] || continue
+    [ -z "$extra" ] || die "Invalid line in $config: $name $repo $extra"
+    [[ "$repo" =~ $repo_re ]] || die "Invalid repository for alias $name in $config: $repo"
+    printf '%s\t%s\n' "$name" "$repo"
+  done <"$config"
+}
+
+# Resolve TARGET into the global array "repos" before any request is made.
+resolve() {
+  local target=${1:-} line table=''
+  repos=()
+  # Read the config only when the target needs it, so a broken file never blocks OWNER/REPO.
+  if [ "$target" = all ] || { [ -n "$target" ] && [[ "$target" != */* ]]; }; then
+    table=$(aliases) || exit 1
+  fi
+  if [ -z "$target" ]; then
+    target=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) ||
+      die 'Not in a GitHub repository; pass OWNER/REPO, an alias or "all"'
+    repos=("$target")
+  elif [ "$target" = all ]; then
+    [ -n "$table" ] || die "No aliases in $config"
+    while IFS=$'\t' read -r _ line; do repos+=("$line"); done <<<"$table"
+  elif [[ "$target" == */* ]]; then
+    repos=("$target")
+  else
+    while IFS=$'\t' read -r _ line; do repos+=("$line"); done < <(awk -F'\t' -v a="$target" '$1 == a' <<<"$table")
+    [ "${#repos[@]}" -gt 0 ] || die "Unknown alias: $target (see gh runners aliases)"
+  fi
+  for line in "${repos[@]}"; do
+    [[ "$line" =~ $repo_re ]] || die "Invalid repository: $line (expected OWNER/REPO)"
+  done
+}
+
+view() {
+  local mode=$1 repo=$2 limit=${3:-} data
+  printf '\n== %s ==\n' "$repo"
+  if [ "$mode" = list ]; then
+    printf 'NAME\tSTATUS\tBUSY\tLABELS\n'
+    # Capture first so an empty result is distinct from an API failure.
+    data=$(gh api --method GET --paginate "repos/$repo/actions/runners?per_page=100" \
+      --jq '.runners[] | [.name, .status, (.busy | tostring), ([.labels[].name] | join(","))] | @tsv') || return
+    printf '%s\n' "${data:-(no runners visible)}"
+  else
+    printf 'ID\tSTATUS\tRESULT\tWORKFLOW\tTITLE\tBRANCH\tCREATED (UTC)\tURL\n'
+    gh run list --repo "$repo" --limit "$limit" \
+      --json databaseId,status,conclusion,workflowName,displayTitle,headBranch,createdAt,url --jq '
+      if length == 0 then "(no workflow runs)" else
+      .[] | [.databaseId, .status, .conclusion, .workflowName, .displayTitle, .headBranch, .createdAt, .url] | @tsv end'
+  fi
+}
+
+show() {
+  local mode=$1 limit=${3:-} repo result=0
+  resolve "${2:-}"
+  for repo in "${repos[@]}"; do
+    # Keep showing the other repositories when one is inaccessible; still fail overall.
+    if ! view "$mode" "$repo" "$limit"; then
+      printf 'Cannot read %s. Check gh auth status and repository permissions (runner listing requires admin access / runner read permission).\n' "$repo" >&2
+      result=1
+    fi
+  done
+  return "$result"
+}
+
+setup() {
+  local target='' name='' dir='' labels='' host repo
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo) target=${2:?--repo needs a value}; shift 2 ;;
+      --name) name=${2:?--name needs a value}; shift 2 ;;
+      --dir) dir=${2:?--dir needs a value}; shift 2 ;;
+      --labels) labels=${2:?--labels needs a value}; shift 2 ;;
+      -h | --help) usage; return 0 ;;
+      *) usage >&2; return 1 ;;
+    esac
+  done
+  [ "$(uname -s)" = Darwin ] || die 'setup runs on macOS only'
+  [ "$(uname -m)" = arm64 ] || die 'setup supports Apple Silicon (arm64) only'
+  resolve "$target"
+  [ "${#repos[@]}" -eq 1 ] || die 'setup takes exactly one repository'
+  repo=${repos[0]}
+  gh auth status >/dev/null 2>&1 || die 'Run gh auth login first'
+  host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)
+  name=${name:-$host-${repo#*/}}
+  dir=${dir:-$HOME/actions-runner-${repo#*/}}
+  labels=${labels:-$host}
+
+  mkdir -p "$dir"
+  cd "$dir"
+
+  # Remove the existing launchd service. svc.sh uninstall stops with the plist left behind when
+  # unload fails (e.g. already unloaded), so remove the plist recorded in .service directly.
+  if [ -f .service ]; then
+    local plist
+    plist=$(cat .service)
+    printf 'Removing existing service: %s\n' "$plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist" .service
+  fi
+
+  # Remove the existing registration (one from another machine or old host name is replaced by --replace).
+  if [ -f .runner ]; then
+    printf 'Removing existing runner: %s\n' "$dir"
+    local remove_token
+    remove_token=$(gh api -X POST "repos/$repo/actions/runners/remove-token" --jq .token)
+    ./config.sh remove --token "$remove_token" || rm -f .runner .credentials .credentials_rsaparams
+  fi
+
+  # Keep the runner itself on the latest release.
+  local version tarball token
+  version=$(gh api repos/actions/runner/releases/latest --jq '.tag_name | ltrimstr("v")')
+  if [ ! -x ./config.sh ] || [ "$(cat .runner-version 2>/dev/null)" != "$version" ]; then
+    printf 'Downloading actions/runner %s\n' "$version"
+    tarball="actions-runner-osx-arm64-$version.tar.gz"
+    curl -fsSL -o "$tarball" "https://github.com/actions/runner/releases/download/v$version/$tarball"
+    tar xzf "$tarball"
+    rm -f "$tarball"
+    printf '%s\n' "$version" >.runner-version
+  fi
+
+  # The registration token is fetched each time and never stored.
+  token=$(gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token)
+  ./config.sh --unattended --replace \
+    --url "https://github.com/$repo" \
+    --token "$token" \
+    --name "$name" \
+    --labels "$labels" \
+    --work _work
+
+  ./svc.sh install
+  ./svc.sh start
+  ./svc.sh status || true
+
+  printf '\nRegistered %s on %s. Check that it is online: gh runners list %s\n' "$name" "$repo" "$repo"
+}
+
+command -v gh >/dev/null 2>&1 || die 'gh is required'
+cmd=${1:-list}
+case "$cmd" in
+  list | runs | setup | aliases) [ "$#" -gt 0 ] && shift ;;
+  -h | --help | help) usage; exit 0 ;;
+  *) cmd=list ;; # "gh runners OWNER/REPO" is short for list
+esac
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+case "$cmd" in
+  list)
+    [ "$#" -le 1 ] || die 'list accepts only a repository target'
+    show list "${1:-}"
+    ;;
+  runs)
+    [ "$#" -le 2 ] || die 'runs accepts a repository target and a limit'
+    limit=${2:-10}
+    if ! [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$limit" -gt 100 ]; then
+      die 'LIMIT must be 1..100'
+    fi
+    show runs "${1:-}" "$limit"
+    ;;
+  setup) setup "$@" ;;
+  aliases)
+    [ "$#" -eq 0 ] || die 'aliases takes no arguments'
+    aliases
+    ;;
+esac
