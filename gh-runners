@@ -281,7 +281,9 @@ remove() {
     esac
     shift
   done
-  [ -n "$sel" ] && [ "$sel" != all ] || die 'remove needs a RUNNER (name, directory or repository)'
+  if [ -z "$sel" ] || [ "$sel" = all ]; then
+    die 'remove needs a RUNNER (name, directory or repository)'
+  fi
   require_mac remove
   select_local "$sel"
   for dir in "${dirs[@]}"; do
