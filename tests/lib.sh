@@ -27,9 +27,9 @@ not_ok() { [[ $rc != 0 ]] || fail "expected failure: $*"; }
 has() { [[ $1 == *"$2"* ]] || fail "expected to contain: $2"; }
 lacks() { [[ $1 != *"$2"* ]] || fail "expected not to contain: $2"; }
 eq() { [[ $1 == "$2" ]] || fail "expected: $2" "actual:   $1"; }
-# json_eq JSON FILTER : the JSON equals jq FILTER (compared after normalising both).
+# json_eq JSON FILTER : JSON is exactly one document, equal to jq FILTER (compared after normalising both).
 json_eq() {
-  jq -e --argjson want "$(jq -nc "$2")" '. == $want' <<<"$1" >/dev/null || fail "JSON is not $2"
+  jq -se --argjson want "$(jq -nc "$2")" 'length == 1 and .[0] == $want' <<<"$1" >/dev/null || fail "JSON is not $2"
 }
 
 # calls [FILTER] : the logged mock calls (one JSON array each), through jq FILTER, one result per line.
