@@ -22,10 +22,27 @@ gh runners aliases              # show the configured aliases
 
 gh runners add                  # register a runner for the current repository on this Mac
 gh runners local                # runners on this Mac: service state, GitHub status, version
+gh runners local dots           # only that runner
 gh runners stop dots            # stop / start / restart a runner (all runners when omitted)
 gh runners upgrade              # update every runner on this Mac to the latest release
 gh runners remove dots          # unregister it, uninstall the service, delete its directory
 ```
+
+Tables are printed as aligned columns on a terminal and as tab-separated rows when the output is piped, so `gh runners list all | grep offline` keeps working; `GH_RUNNERS_FORMAT=table` or `=tsv` overrides the choice.
+
+### JSON
+
+`--json` (on `list`, `runs`, `local` and `aliases`) prints one JSON array for scripts and launchers, with full values (no truncation) and one object per runner, run or alias:
+
+```sh
+gh runners list all --json      # [{"repository", "name", "status", "busy", "labels": [...]}, ...]
+gh runners runs dots 5 --json   # [{"repository", "id", "status", "conclusion", "workflow", "title", "branch", "createdAt", "url"}, ...]
+gh runners local --json         # [{"name", "repository", "service", "status", "busy", "version", "dir"}, ...]
+gh runners aliases --json       # [{"alias", "repository"}, ...]
+```
+
+With several repositories the array holds them all; a repository that cannot be read is reported on stderr and the exit status is non-zero, but the array is still printed.
+In `local --json`, `status` and `busy` are `null` when GitHub could not be read, and `status` is `"not registered"` when the runner is missing on GitHub.
 
 `list`, `runs`, `aliases` and `local` only read. Listing runners needs admin access to the repository (or a token that can read runners); plain read access often returns HTTP 403.
 When one repository fails, the others are still shown and the command exits non-zero.
@@ -51,7 +68,7 @@ Each runner lives in its own directory `~/actions-runner-*` and runs as a launch
 The directories are the only state: `local`, `start`, `stop`, `restart`, `upgrade` and `remove` find runners by looking for a registration (`.runner`) in them.
 
 `RUNNER` selects runners on this Mac by name, by directory, or by repository (`OWNER/REPO` or an alias).
-`start`, `stop`, `restart` and `upgrade` act on every runner when it is omitted; `remove` always needs one.
+`local`, `start`, `stop`, `restart` and `upgrade` act on every runner when it is omitted; `remove` always needs one.
 
 #### add
 

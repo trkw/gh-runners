@@ -88,8 +88,8 @@ class GhRunnersTests(unittest.TestCase):
             result = self.run_cli(*args)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("== cur/repo ==", result.stdout)
-            self.assertIn("runner-a\tonline\ttrue\tself-hosted,macos", result.stdout)
-            self.assertIn("runner-b\toffline\tfalse", result.stdout)
+            self.assertIn("runner-a\tonline,busy\tself-hosted,macos", result.stdout)
+            self.assertIn("runner-b\toffline\t", result.stdout)
             self.assertIn("repos/cur/repo/actions/runners?per_page=100", self.api_calls()[0])
 
     def test_no_current_repo(self):
@@ -109,7 +109,7 @@ class GhRunnersTests(unittest.TestCase):
     def test_runs_limit(self):
         result = self.run_cli("runs", "example/other", "20")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("42\tcompleted\tsuccess\tCI\tBuild\tmain", result.stdout)
+        self.assertIn("42\tsuccess\tCI\tBuild\tmain\t2026-10-26 00:00 UTC", result.stdout)
         self.assertIn("https://github.com/o/r/actions/runs/42", result.stdout)
         call = self.calls()[-1]
         self.assertEqual(call[call.index("--repo") + 1], "example/other")
@@ -118,6 +118,55 @@ class GhRunnersTests(unittest.TestCase):
         call = self.calls()[-1]
         self.assertEqual(call[call.index("--repo") + 1], "example/dots")
         self.assertEqual(call[call.index("--limit") + 1], "10")
+
+    def test_table_format_aligns_columns(self):
+        result = self.run_cli("list", "corp", GH_RUNNERS_FORMAT="table")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NAME      STATUS       LABELS", result.stdout)
+        self.assertIn("runner-a  online,busy  self-hosted,macos", result.stdout)
+        self.assertIn("runner-b  offline", result.stdout)
+        result = self.run_cli("aliases", GH_RUNNERS_FORMAT="table")
+        self.assertIn("corp  example/corp", result.stdout)
+        result = self.run_cli("list", "corp", GH_RUNNERS_FORMAT="nope")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be table or tsv", result.stderr)
+
+    def test_unknown_word_names_the_help(self):
+        result = self.run_cli("lst")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown command or alias: lst", result.stderr)
+
+    def test_json(self):
+        result = self.run_cli("list", "--json", "corp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            {"repository": "example/corp", "name": "runner-a", "status": "online", "busy": True,
+             "labels": ["self-hosted", "macos"]},
+            {"repository": "example/corp", "name": "runner-b", "status": "offline", "busy": False,
+             "labels": []}])
+        result = self.run_cli("runs", "dots", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            {"repository": "example/dots", "id": 42, "status": "completed", "conclusion": "success",
+             "workflow": "CI", "title": "Build", "branch": "main", "createdAt": "2026-10-26T00:00:00Z",
+             "url": "https://github.com/o/r/actions/runs/42"}])
+        result = self.run_cli("aliases", "--json")
+        self.assertEqual(json.loads(result.stdout)[0], {"alias": "corp", "repository": "example/corp"})
+        result = self.run_cli("--json", "corp", TEST_SCENARIO="empty")
+        self.assertEqual(json.loads(result.stdout), [])
+
+    def test_json_with_a_failing_repo_is_still_one_array(self):
+        result = self.run_cli("list", "all", "--json", TEST_SCENARIO="failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot read forbidden/repo", result.stderr)
+        rows = json.loads(result.stdout)
+        self.assertEqual(sorted({r["repository"] for r in rows}), ["example/corp", "example/dots"])
+
+    def test_json_rejected_by_other_commands(self):
+        result = self.run_cli("add", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--json works with", result.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_all_uses_every_alias(self):
         result = self.run_cli("list", "all")

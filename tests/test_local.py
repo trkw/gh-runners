@@ -45,6 +45,9 @@ elif name == "gh":
             sys.exit(1)
         print("TOKEN")
     elif args[0] == "api":
+        if os.environ.get("TEST_SCENARIO") == "api-failure":
+            print("HTTP 403", file=sys.stderr)
+            sys.exit(1)
         rows = [{"name": "host-dotfiles", "status": "online", "busy": True},
                 {"name": "host-app", "status": "offline", "busy": False}]
         sys.exit(subprocess.run(["jq", "-r", args[args.index("--jq") + 1]],
@@ -128,6 +131,33 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(lines[0], "NAME\tREPOSITORY\tSERVICE\tGITHUB\tVERSION\tDIR")
         self.assertIn(f"host-app\torg/app\tstopped\toffline\t{LATEST}\t{self.app}", lines)
         self.assertIn(f"host-dotfiles\tme/dotfiles\trunning\tonline,busy\t2.300.0\t{self.dots}", lines)
+
+    def test_local_accepts_a_runner(self):
+        result = self.run_cli("local", "dots", GH_RUNNERS_FORMAT="table")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assertIn("host-dotfiles  me/dotfiles  stopped  online,busy  2.300.0", result.stdout)
+        result = self.run_cli("local", "nope")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No runner on this Mac matches: nope", result.stderr)
+
+    def test_local_reports_unreadable_github_state(self):
+        result = self.run_cli("local", TEST_SCENARIO="api-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Some GitHub states could not be read", result.stderr)
+        self.assertIn("host-app\torg/app\tstopped\t?", result.stdout)
+
+    def test_local_json(self):
+        result = self.run_cli("local", "--json", TEST_RUNNING="actions.runner.dotfiles")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {r["name"]: r for r in json.loads(result.stdout)}
+        self.assertEqual(rows["host-dotfiles"], {
+            "name": "host-dotfiles", "repository": "me/dotfiles", "service": "running",
+            "status": "online", "busy": True, "version": "2.300.0", "dir": str(self.dots)})
+        self.assertEqual(rows["host-app"]["status"], "offline")
+        result = self.run_cli("local", "--json", TEST_SCENARIO="api-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual({r["status"] for r in json.loads(result.stdout)}, {None})
 
     def test_select_by_name_repo_alias_and_dir(self):
         for sel in ("host-dotfiles", "me/dotfiles", "dots", str(self.dots)):

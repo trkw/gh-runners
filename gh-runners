@@ -12,7 +12,7 @@ Usage: gh runners [list] [TARGET]          runners on GitHub: name / status / bu
 Runners on this Mac (macOS, Apple Silicon; each runner is a launchd service):
        gh runners add [TARGET] [--name NAME] [--dir DIR] [--labels LABELS]
                                            (re)register a runner (setup is an alias)
-       gh runners local                    runners on this Mac: service state and GitHub status
+       gh runners local [RUNNER]           runners on this Mac: service state and GitHub status
        gh runners remove RUNNER [--keep-dir] [--yes]
                                            unregister, uninstall the service, delete the directory
        gh runners start|stop|restart [RUNNER]
@@ -25,6 +25,9 @@ Runners on this Mac are the directories ~/actions-runner-* that hold a registrat
 
 Config: ${GH_RUNNERS_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/gh-runners/repos}
   one "ALIAS OWNER/REPO" per line; "#" starts a comment.
+Tables are aligned on a terminal and tab-separated when piped;
+GH_RUNNERS_FORMAT=table|tsv overrides that.
+--json (list, runs, local, aliases) prints one JSON array instead, for scripts.
 HELP
 }
 
@@ -33,6 +36,26 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 config=${GH_RUNNERS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-runners/repos}
 repo_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 export GH_PAGER=cat GH_PROMPT_DISABLED=1 NO_COLOR=1
+
+# Aligned columns for a terminal, tab-separated for a pipe; GH_RUNNERS_FORMAT wins.
+format=${GH_RUNNERS_FORMAT:-}
+if [ -z "$format" ]; then
+  if [ -t 1 ]; then format=table; else format=tsv; fi
+fi
+case "$format" in table | tsv) ;; *) die "GH_RUNNERS_FORMAT must be table or tsv: $format" ;; esac
+
+# Read tab-separated rows and pad every column but the last to the widest cell.
+table() {
+  [ "$format" = table ] || { cat; return; }
+  awk -F'\t' '
+    { for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (length($i) > width[i]) width[i] = length($i) }
+      if (NF > cols) cols = NF; rows = NR }
+    END { for (r = 1; r <= rows; r++) { line = ""
+            for (i = 1; i <= cols; i++) {
+              if (i > 1) line = line "  "
+              if (i < cols) line = line sprintf("%-" width[i] "s", cell[r, i]); else line = line cell[r, i] }
+            sub(/[[:space:]]+$/, "", line); print line } }'
+}
 
 # Print "ALIAS<TAB>OWNER/REPO" for each valid config line.
 aliases() {
@@ -66,41 +89,79 @@ resolve() {
     repos=("$target")
   else
     while IFS=$'\t' read -r _ line; do repos+=("$line"); done < <(awk -F'\t' -v a="$target" '$1 == a' <<<"$table")
-    [ "${#repos[@]}" -gt 0 ] || die "Unknown alias: $target (see gh runners aliases)"
+    [ "${#repos[@]}" -gt 0 ] || die "Unknown command or alias: $target (see gh runners --help and gh runners aliases)"
   fi
   for line in "${repos[@]}"; do
     [[ "$line" =~ $repo_re ]] || die "Invalid repository: $line (expected OWNER/REPO)"
   done
 }
 
+# Print the stdin lines (one JSON value each) as one JSON array.
+json_array() {
+  awk 'BEGIN { printf "[" } NF { printf "%s%s", (n++ ? "," : ""), $0 } END { print "]" }'
+}
+
+# Print $1 as a JSON string.
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+
+# One JSON object per line for REPO; the repository name is safe in a jq string (repo_re).
+view_json() {
+  local mode=$1 repo=$2 limit=${3:-}
+  if [ "$mode" = list ]; then
+    gh api --method GET --paginate "repos/$repo/actions/runners?per_page=100" --jq "
+      .runners[] | {repository: \"$repo\", name, status, busy, labels: [.labels[].name]} | tojson"
+  else
+    gh run list --repo "$repo" --limit "$limit" \
+      --json databaseId,status,conclusion,workflowName,displayTitle,headBranch,createdAt,url --jq "
+      .[] | {repository: \"$repo\", id: .databaseId, status,
+        conclusion: (if (.conclusion // \"\") == \"\" then null else .conclusion end),
+        workflow: .workflowName, title: .displayTitle, branch: .headBranch, createdAt, url} | tojson"
+  fi
+}
+
 view() {
   local mode=$1 repo=$2 limit=${3:-} data
   printf '\n== %s ==\n' "$repo"
+  # Capture first so an empty result is distinct from an API failure, and so the table can be aligned.
   if [ "$mode" = list ]; then
-    printf 'NAME\tSTATUS\tBUSY\tLABELS\n'
-    # Capture first so an empty result is distinct from an API failure.
     data=$(gh api --method GET --paginate "repos/$repo/actions/runners?per_page=100" \
-      --jq '.runners[] | [.name, .status, (.busy | tostring), ([.labels[].name] | join(","))] | @tsv') || return
-    printf '%s\n' "${data:-(no runners visible)}"
+      --jq '.runners[] | [.name, (if .busy then "\(.status),busy" else .status end),
+        ([.labels[].name] | join(","))] | @tsv') || return
+    { printf 'NAME\tSTATUS\tLABELS\n'; printf '%s\n' "${data:-(no runners visible)}"; } | table
   else
-    printf 'ID\tSTATUS\tRESULT\tWORKFLOW\tTITLE\tBRANCH\tCREATED (UTC)\tURL\n'
-    gh run list --repo "$repo" --limit "$limit" \
+    data=$(gh run list --repo "$repo" --limit "$limit" \
       --json databaseId,status,conclusion,workflowName,displayTitle,headBranch,createdAt,url --jq '
       if length == 0 then "(no workflow runs)" else
-      .[] | [.databaseId, .status, .conclusion, .workflowName, .displayTitle, .headBranch, .createdAt, .url] | @tsv end'
+      .[] | [.databaseId, (if (.conclusion // "") == "" then .status else .conclusion end), .workflowName,
+        (.displayTitle | if length > 40 then .[0:39] + "\u2026" else . end), .headBranch,
+        (.createdAt | sub("T"; " ") | sub(":[0-9][0-9]Z$"; " UTC")), .url] | @tsv end') || return
+    { printf 'ID\tRESULT\tWORKFLOW\tTITLE\tBRANCH\tCREATED\tURL\n'; printf '%s\n' "$data"; } | table
   fi
 }
 
 show() {
-  local mode=$1 limit=${3:-} repo result=0
+  local mode=$1 limit=${3:-} repo result=0 data lines=''
   resolve "${2:-}"
   for repo in "${repos[@]}"; do
     # Keep showing the other repositories when one is inaccessible; still fail overall.
-    if ! view "$mode" "$repo" "$limit"; then
+    if [ "$json" = 1 ] && data=$(view_json "$mode" "$repo" "$limit"); then
+      [ -z "$data" ] || lines+=$data$'\n'
+    elif [ "$json" = 0 ] && view "$mode" "$repo" "$limit"; then
+      :
+    else
       printf 'Cannot read %s. Check gh auth status and repository permissions (runner listing requires admin access / runner read permission).\n' "$repo" >&2
       result=1
     fi
   done
+  if [ "$json" = 1 ]; then printf '%s' "$lines" | json_array; fi
   return "$result"
 }
 
@@ -252,23 +313,40 @@ add() {
 }
 
 show_local() {
-  local dir name repo state github data result=0
+  local dir name repo state status busy version data result=0 rows='' objects=''
   require_mac local
-  select_local ''
-  printf 'NAME\tREPOSITORY\tSERVICE\tGITHUB\tVERSION\tDIR\n'
+  select_local "${1:-}"
+  # Collect the rows first: a pipeline would run the loop in a subshell and lose "result".
   for dir in "${dirs[@]}"; do
     name=$(runner_field "$dir" agentName)
     repo=$(runner_repo "$dir")
     state=$(service_state "$dir")
+    version=$(runner_version "$dir")
     if data=$(gh api --method GET --paginate "repos/$repo/actions/runners?per_page=100" \
-      --jq ".runners[] | select(.name == \"$name\") | if .busy then \"\\(.status),busy\" else .status end"); then
-      github=${data:-not registered}
+      --jq ".runners[] | select(.name == \"$name\") | \"\\(.status) \\(.busy)\""); then
+      status=${data% *} busy=${data#* }
+      [ -n "$data" ] || status='not registered' busy=false
     else
-      github='?'
+      status='?' busy='?'
       result=1
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$repo" "$state" "$github" "$(runner_version "$dir")" "$dir"
+    if [ "$json" = 1 ]; then
+      objects+=$(printf '{"name":%s,"repository":%s,"service":%s,"status":%s,"busy":%s,"version":%s,"dir":%s}' \
+        "$(json_str "$name")" "$(json_str "$repo")" "$(json_str "$state")" \
+        "$(if [ "$status" = '?' ]; then echo null; else json_str "$status"; fi)" \
+        "$(if [ "$busy" = '?' ]; then echo null; else echo "$busy"; fi)" \
+        "$(if [ "$version" = '?' ]; then echo null; else json_str "$version"; fi)" \
+        "$(json_str "$dir")")$'\n'
+    else
+      if [ "$busy" = true ]; then status+=,busy; fi
+      rows+=$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$name" "$repo" "$state" "$status" "$version" "$dir")$'\n'
+    fi
   done
+  if [ "$json" = 1 ]; then
+    printf '%s' "$objects" | json_array
+  else
+    { printf 'NAME\tREPOSITORY\tSERVICE\tGITHUB\tVERSION\tDIR\n'; printf '%s' "$rows"; } | table
+  fi
   [ "$result" = 0 ] || printf 'Some GitHub states could not be read (?). Check gh auth status and admin access.\n' >&2
   return "$result"
 }
@@ -355,6 +433,16 @@ case "$cmd" in
   -h | --help | help) usage; exit 0 ;;
   *) cmd=list ;; # "gh runners OWNER/REPO" is short for list
 esac
+# --json may come anywhere after the command.
+json=0 args=()
+for arg in "$@"; do
+  if [ "$arg" = --json ]; then json=1; else args+=("$arg"); fi
+done
+set -- ${args[@]+"${args[@]}"}
+case "$cmd" in
+  list | runs | local | aliases) ;;
+  *) [ "$json" = 0 ] || die '--json works with list, runs, local and aliases' ;;
+esac
 case "${1:-}" in -h | --help) usage; exit 0 ;; esac
 case "$cmd" in
   list)
@@ -371,12 +459,19 @@ case "$cmd" in
     ;;
   aliases)
     [ "$#" -eq 0 ] || die 'aliases takes no arguments'
-    aliases
+    if [ "$json" = 1 ]; then
+      table=$(aliases) || exit 1
+      while IFS=$'\t' read -r name repo; do
+        [ -z "$name" ] || printf '{"alias":%s,"repository":%s}\n' "$(json_str "$name")" "$(json_str "$repo")"
+      done <<<"$table" | json_array
+    else
+      aliases | table
+    fi
     ;;
   add | setup) add "$@" ;;
   local)
-    [ "$#" -eq 0 ] || die 'local takes no arguments'
-    show_local
+    [ "$#" -le 1 ] || die 'local accepts only a runner'
+    show_local "${1:-}"
     ;;
   remove) remove "$@" ;;
   start | stop | restart) service "$cmd" "$@" ;;
