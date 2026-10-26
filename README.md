@@ -81,7 +81,7 @@ gh runners remove RUNNER [--keep-dir] [--yes]
 
 Uninstalls the launchd service, unregisters the runner from GitHub and deletes its directory (`--keep-dir` keeps it).
 It asks for confirmation; pass `--yes` when not on a terminal.
-If the removal token cannot be fetched, it stops there with the directory and the registration kept, so `gh runners add` can restore the service.
+If unregistering fails (the removal token or `config.sh remove`), it stops there and keeps the directory, so the removal can be retried (`gh runners add` restores the service).
 
 #### upgrade
 

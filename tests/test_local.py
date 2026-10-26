@@ -60,6 +60,7 @@ def make_scripts(d, version, log=None):
     log = log or os.environ["TEST_LOG"]
     for rel, body in [
         ("config.sh", 'printf "%s\\n" "[\\"config.sh\\", \\"$PWD\\", \\"$1\\"]" >> ' + log + '\n'
+                      '[ "$1" = remove ] && [ "$TEST_SCENARIO" = config-failure ] && exit 1\n'
                       '[ "$1" = remove ] && rm -f .runner\n'
                       '[ "$1" = --unattended ] && printf "{\\"agentName\\": \\"new\\", \\"gitHubUrl\\": \\"https://github.com/x/y\\"}" > .runner\n'
                       'exit 0\n'),
@@ -179,6 +180,10 @@ class LocalTests(unittest.TestCase):
         result = self.run_cli("remove", "host-app", "--yes", TEST_SCENARIO="token-failure")
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.app.exists())  # never deleted while still registered
+        result = self.run_cli("remove", "host-app", "--yes", TEST_SCENARIO="config-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not unregister host-app", result.stderr)
+        self.assertTrue((self.app / ".runner").exists())
 
     def test_upgrade(self):
         result = self.run_cli("upgrade", TEST_RUNNING="actions.runner.dotfiles")

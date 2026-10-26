@@ -187,11 +187,14 @@ uninstall_service() {
   rm -f "$plist" .service
 }
 
-# Unregister the runner in the current directory from REPO (falls back to dropping the local files).
+# Unregister the runner in the current directory from REPO. With "strict" a failure is returned;
+# otherwise it falls back to dropping the local registration files (add re-registers with --replace).
 unregister() {
   local token
   token=$(gh api -X POST "repos/$1/actions/runners/remove-token" --jq .token) || return
-  ./config.sh remove --token "$token" || rm -f .runner .credentials .credentials_rsaparams
+  if ./config.sh remove --token "$token"; then return 0; fi
+  [ "${2:-}" != strict ] || return 1
+  rm -f .runner .credentials .credentials_rsaparams
 }
 
 add() {
@@ -298,7 +301,9 @@ remove() {
   for dir in "${dirs[@]}"; do
     name=$(runner_field "$dir" agentName)
     repo=$(runner_repo "$dir")
-    (cd "$dir" && uninstall_service && unregister "$repo")
+    if ! (cd "$dir" && uninstall_service && unregister "$repo" strict); then
+      die "Could not unregister $name from $repo; kept $dir (run gh runners remove again)"
+    fi
     if [ "$keep" = 0 ]; then rm -rf "$dir"; fi
     printf 'Removed %s from %s\n' "$name" "$repo"
   done
