@@ -57,6 +57,7 @@
                 cp -r ${self}/. src && chmod -R u+w src
                 patchShebangs src
                 python3 src/tests/test_gh_runners.py
+                python3 src/tests/test_local.py
                 touch $out
               '';
           package = self.packages.${system}.default;
