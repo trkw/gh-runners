@@ -90,6 +90,9 @@ Registration tokens are fetched with `gh api` each time and are never stored.
 | `--dir` | `~/actions-runner-<repo name>` |
 | `--labels` | `<LocalHostName>` (plus the default `self-hosted`, `macOS`, `ARM64`) |
 
+To rename an existing runner, run `add` again for its repository (with `--name`, or without it for the default name): the registration in `DIR` is replaced.
+Pass `--labels` again if workflows rely on labels other than the defaults.
+
 The account needs admin access to the repository.
 
 #### remove
