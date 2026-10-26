@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
-# gh runners: look at self-hosted GitHub Actions runners and (re)register one on this Mac.
-# list / runs only read the GitHub API. setup is the only command that changes anything.
+# gh runners: look at self-hosted GitHub Actions runners and manage the ones on this Mac.
+# list / runs / local / aliases only read. add / remove / start / stop / restart / upgrade change things.
 set -euo pipefail
 
 usage() {
   cat <<'HELP'
-Usage: gh runners [list] [TARGET]          runners: name / status / busy / labels
+Usage: gh runners [list] [TARGET]          runners on GitHub: name / status / busy / labels
        gh runners runs [TARGET] [LIMIT]    recent workflow runs (default 10, max 100)
-       gh runners setup [--repo TARGET] [--name NAME] [--dir DIR] [--labels LABELS]
-                                           (re)register a runner on this Mac as a launchd service
        gh runners aliases                  show the configured aliases
+
+Runners on this Mac (macOS, Apple Silicon; each runner is a launchd service):
+       gh runners add [TARGET] [--name NAME] [--dir DIR] [--labels LABELS]
+                                           (re)register a runner (setup is an alias)
+       gh runners local                    runners on this Mac: service state and GitHub status
+       gh runners remove RUNNER [--keep-dir] [--yes]
+                                           unregister, uninstall the service, delete the directory
+       gh runners start|stop|restart [RUNNER]
+       gh runners upgrade [RUNNER]         update to the latest actions/runner release
 
 TARGET is OWNER/REPO, an alias from the config file, or "all" (every alias).
 Without TARGET the current repository is used (GH_REPO or the git remote).
+RUNNER is a runner name, its directory, or a TARGET; without it, every runner on this Mac.
+Runners on this Mac are the directories ~/actions-runner-* that hold a registration (.runner).
 
 Config: ${GH_RUNNERS_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/gh-runners/repos}
   one "ALIAS OWNER/REPO" per line; "#" starts a comment.
@@ -95,22 +104,111 @@ show() {
   return "$result"
 }
 
-setup() {
-  local target='' name='' dir='' labels='' host repo
+require_mac() {
+  [ "$(uname -s)" = Darwin ] || die "$1 runs on macOS only"
+  [ "$(uname -m)" = arm64 ] || die "$1 supports Apple Silicon (arm64) only"
+}
+
+# Read one string field from a runner's .runner file (JSON written by config.sh).
+runner_field() {
+  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1/.runner" | head -n 1
+}
+
+runner_repo() {
+  local url
+  url=$(runner_field "$1" gitHubUrl)
+  url=${url%/}
+  printf '%s\n' "${url#https://github.com/}"
+}
+
+runner_version() {
+  if [ -x "$1/bin/Runner.Listener" ]; then
+    "$1/bin/Runner.Listener" --version 2>/dev/null && return
+  fi
+  cat "$1/.runner-version" 2>/dev/null || echo '?'
+}
+
+# launchd state of a runner: running / stopped / not installed.
+service_state() {
+  local plist label
+  [ -f "$1/.service" ] || { echo 'not installed'; return; }
+  plist=$(cat "$1/.service")
+  label=$(basename "$plist" .plist)
+  if launchctl list "$label" 2>/dev/null | grep -q '"PID"'; then echo running; else echo stopped; fi
+}
+
+# Set the global array "dirs" to the runners on this Mac that match SELECTOR (all when empty).
+select_local() {
+  local sel=${1:-} dir name repo table='' target=''
+  dirs=()
+  if [ -n "$sel" ] && [ "$sel" != all ] && [[ "$sel" != */* ]] && [ ! -d "$sel" ]; then
+    table=$(aliases) || exit 1
+    target=$(awk -F'\t' -v a="$sel" '$1 == a { print $2 }' <<<"$table")
+  fi
+  for dir in "$HOME"/actions-runner-*; do
+    [ -f "$dir/.runner" ] || continue
+    name=$(runner_field "$dir" agentName)
+    repo=$(runner_repo "$dir")
+    if [ -z "$sel" ] || [ "$sel" = all ] || [ "$sel" = "$name" ] || [ "$sel" = "$repo" ] ||
+      { [ -n "$target" ] && [ "$target" = "$repo" ]; } ||
+      { [ -d "$sel" ] && [ "$(cd "$sel" && pwd -P)" = "$(cd "$dir" && pwd -P)" ]; }; then
+      dirs+=("$dir")
+    fi
+  done
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    if [ -n "$sel" ]; then die "No runner on this Mac matches: $sel (see gh runners local)"; fi
+    die 'No runners on this Mac (add one with gh runners add)'
+  fi
+}
+
+latest_version() {
+  gh api repos/actions/runner/releases/latest --jq '.tag_name | ltrimstr("v")'
+}
+
+# Download actions/runner VERSION into DIR (the current directory).
+install_runner() {
+  local version=$1 tarball
+  printf 'Downloading actions/runner %s\n' "$version"
+  tarball="actions-runner-osx-arm64-$version.tar.gz"
+  curl -fsSL -o "$tarball" "https://github.com/actions/runner/releases/download/v$version/$tarball"
+  tar xzf "$tarball"
+  rm -f "$tarball"
+  printf '%s\n' "$version" >.runner-version
+}
+
+# Remove the launchd service of the runner in the current directory. svc.sh uninstall stops with
+# the plist left behind when unload fails (e.g. already unloaded), so remove the recorded plist directly.
+uninstall_service() {
+  [ -f .service ] || return 0
+  local plist
+  plist=$(cat .service)
+  printf 'Removing service: %s\n' "$plist"
+  launchctl unload "$plist" 2>/dev/null || true
+  rm -f "$plist" .service
+}
+
+# Unregister the runner in the current directory from REPO (falls back to dropping the local files).
+unregister() {
+  local token
+  token=$(gh api -X POST "repos/$1/actions/runners/remove-token" --jq .token) || return
+  ./config.sh remove --token "$token" || rm -f .runner .credentials .credentials_rsaparams
+}
+
+add() {
+  local target='' name='' dir='' labels='' host repo old version token
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --repo) target=${2:?--repo needs a value}; shift 2 ;;
       --name) name=${2:?--name needs a value}; shift 2 ;;
       --dir) dir=${2:?--dir needs a value}; shift 2 ;;
       --labels) labels=${2:?--labels needs a value}; shift 2 ;;
-      -h | --help) usage; return 0 ;;
-      *) usage >&2; return 1 ;;
+      -*) usage >&2; return 1 ;;
+      *) [ -z "$target" ] || die 'add takes one repository'; target=$1; shift ;;
     esac
   done
-  [ "$(uname -s)" = Darwin ] || die 'setup runs on macOS only'
-  [ "$(uname -m)" = arm64 ] || die 'setup supports Apple Silicon (arm64) only'
+  require_mac add
   resolve "$target"
-  [ "${#repos[@]}" -eq 1 ] || die 'setup takes exactly one repository'
+  [ "${#repos[@]}" -eq 1 ] || die 'add takes exactly one repository'
   repo=${repos[0]}
   gh auth status >/dev/null 2>&1 || die 'Run gh auth login first'
   host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)
@@ -120,35 +218,18 @@ setup() {
 
   mkdir -p "$dir"
   cd "$dir"
-
-  # Remove the existing launchd service. svc.sh uninstall stops with the plist left behind when
-  # unload fails (e.g. already unloaded), so remove the plist recorded in .service directly.
-  if [ -f .service ]; then
-    local plist
-    plist=$(cat .service)
-    printf 'Removing existing service: %s\n' "$plist"
-    launchctl unload "$plist" 2>/dev/null || true
-    rm -f "$plist" .service
-  fi
-
+  uninstall_service
   # Remove the existing registration (one from another machine or old host name is replaced by --replace).
   if [ -f .runner ]; then
     printf 'Removing existing runner: %s\n' "$dir"
-    local remove_token
-    remove_token=$(gh api -X POST "repos/$repo/actions/runners/remove-token" --jq .token)
-    ./config.sh remove --token "$remove_token" || rm -f .runner .credentials .credentials_rsaparams
+    old=$(runner_repo .)
+    unregister "${old:-$repo}"
   fi
 
   # Keep the runner itself on the latest release.
-  local version tarball token
-  version=$(gh api repos/actions/runner/releases/latest --jq '.tag_name | ltrimstr("v")')
+  version=$(latest_version)
   if [ ! -x ./config.sh ] || [ "$(cat .runner-version 2>/dev/null)" != "$version" ]; then
-    printf 'Downloading actions/runner %s\n' "$version"
-    tarball="actions-runner-osx-arm64-$version.tar.gz"
-    curl -fsSL -o "$tarball" "https://github.com/actions/runner/releases/download/v$version/$tarball"
-    tar xzf "$tarball"
-    rm -f "$tarball"
-    printf '%s\n' "$version" >.runner-version
+    install_runner "$version"
   fi
 
   # The registration token is fetched each time and never stored.
@@ -167,10 +248,103 @@ setup() {
   printf '\nRegistered %s on %s. Check that it is online: gh runners list %s\n' "$name" "$repo" "$repo"
 }
 
+show_local() {
+  local dir name repo state github data result=0
+  require_mac local
+  select_local ''
+  printf 'NAME\tREPOSITORY\tSERVICE\tGITHUB\tVERSION\tDIR\n'
+  for dir in "${dirs[@]}"; do
+    name=$(runner_field "$dir" agentName)
+    repo=$(runner_repo "$dir")
+    state=$(service_state "$dir")
+    if data=$(gh api --method GET --paginate "repos/$repo/actions/runners?per_page=100" \
+      --jq ".runners[] | select(.name == \"$name\") | if .busy then \"\\(.status),busy\" else .status end"); then
+      github=${data:-not registered}
+    else
+      github='?'
+      result=1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$repo" "$state" "$github" "$(runner_version "$dir")" "$dir"
+  done
+  [ "$result" = 0 ] || printf 'Some GitHub states could not be read (?). Check gh auth status and admin access.\n' >&2
+  return "$result"
+}
+
+remove() {
+  local sel='' keep=0 yes=0 dir name repo answer
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --keep-dir) keep=1 ;;
+      -y | --yes) yes=1 ;;
+      -*) usage >&2; return 1 ;;
+      *) [ -z "$sel" ] || die 'remove takes one runner'; sel=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$sel" ] && [ "$sel" != all ] || die 'remove needs a RUNNER (name, directory or repository)'
+  require_mac remove
+  select_local "$sel"
+  for dir in "${dirs[@]}"; do
+    printf 'Will remove %s (%s) in %s\n' "$(runner_field "$dir" agentName)" "$(runner_repo "$dir")" "$dir"
+  done
+  if [ "$yes" = 0 ]; then
+    [ -t 0 ] || die 'Not a terminal; pass --yes to remove'
+    read -r -p 'Remove? [y/N] ' answer
+    [[ "$answer" =~ ^[Yy] ]] || die 'Cancelled'
+  fi
+  gh auth status >/dev/null 2>&1 || die 'Run gh auth login first'
+  for dir in "${dirs[@]}"; do
+    name=$(runner_field "$dir" agentName)
+    repo=$(runner_repo "$dir")
+    (cd "$dir" && uninstall_service && unregister "$repo")
+    if [ "$keep" = 0 ]; then rm -rf "$dir"; fi
+    printf 'Removed %s from %s\n' "$name" "$repo"
+  done
+}
+
+# start / stop / restart through the runner's own svc.sh.
+service() {
+  local action=$1 dir
+  [ "$#" -le 2 ] || die "$action takes at most one runner"
+  require_mac "$action"
+  select_local "${2:-}"
+  for dir in "${dirs[@]}"; do
+    [ -f "$dir/.service" ] || die "No service installed in $dir (run gh runners add again)"
+    printf '%s %s\n' "$action" "$(runner_field "$dir" agentName)"
+    case "$action" in
+      restart) (cd "$dir" && ./svc.sh stop && ./svc.sh start) ;;
+      *) (cd "$dir" && "./svc.sh" "$action") ;;
+    esac
+  done
+}
+
+upgrade() {
+  local dir version current state
+  [ "$#" -le 1 ] || die 'upgrade takes at most one runner'
+  require_mac upgrade
+  select_local "${1:-}"
+  version=$(latest_version)
+  for dir in "${dirs[@]}"; do
+    current=$(runner_version "$dir")
+    if [ "$current" = "$version" ]; then
+      printf '%s is already %s\n' "$(runner_field "$dir" agentName)" "$version"
+      continue
+    fi
+    state=$(service_state "$dir")
+    (
+      cd "$dir"
+      if [ "$state" = running ]; then ./svc.sh stop; fi
+      install_runner "$version"
+      if [ "$state" = running ]; then ./svc.sh start; fi
+    )
+    printf 'Upgraded %s: %s -> %s\n' "$(runner_field "$dir" agentName)" "$current" "$version"
+  done
+}
+
 command -v gh >/dev/null 2>&1 || die 'gh is required'
 cmd=${1:-list}
 case "$cmd" in
-  list | runs | setup | aliases) [ "$#" -gt 0 ] && shift ;;
+  list | runs | aliases | add | setup | local | remove | start | stop | restart | upgrade) [ "$#" -gt 0 ] && shift ;;
   -h | --help | help) usage; exit 0 ;;
   *) cmd=list ;; # "gh runners OWNER/REPO" is short for list
 esac
@@ -188,9 +362,16 @@ case "$cmd" in
     fi
     show runs "${1:-}" "$limit"
     ;;
-  setup) setup "$@" ;;
   aliases)
     [ "$#" -eq 0 ] || die 'aliases takes no arguments'
     aliases
     ;;
+  add | setup) add "$@" ;;
+  local)
+    [ "$#" -eq 0 ] || die 'local takes no arguments'
+    show_local
+    ;;
+  remove) remove "$@" ;;
+  start | stop | restart) service "$cmd" "$@" ;;
+  upgrade) upgrade "$@" ;;
 esac

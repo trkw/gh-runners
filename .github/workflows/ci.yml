@@ -13,7 +13,9 @@ jobs:
       - name: shellcheck
         run: shellcheck gh-runners
       - name: tests
-        run: python3 tests/test_gh_runners.py
+        run: |
+          python3 tests/test_gh_runners.py
+          python3 tests/test_local.py
 
   nix:
     runs-on: ubuntu-latest
