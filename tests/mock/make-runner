@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# make-runner DIR VERSION: fake runner scripts in DIR that log their calls to $TEST_LOG.
+set -eu
+dir=$1 version=$2
+mkdir -p "$dir/bin"
+cat >"$dir/config.sh" <<SH
+#!/bin/sh
+printf '["config.sh", "%s", "%s"]\n' "\$PWD" "\$1" >>"$TEST_LOG"
+[ "\$1" = remove ] && [ "\$TEST_SCENARIO" = config-failure ] && exit 1
+[ "\$1" = remove ] && rm -f .runner
+[ "\$1" = --unattended ] && printf '{"agentName": "new", "gitHubUrl": "https://github.com/x/y"}' >.runner
+exit 0
+SH
+cat >"$dir/svc.sh" <<SH
+#!/bin/sh
+printf '["svc.sh", "%s", "%s"]\n' "\$PWD" "\$1" >>"$TEST_LOG"
+[ "\$1" = install ] && echo "\$PWD/x.plist" >.service
+exit 0
+SH
+printf '#!/bin/sh\necho %s\n' "$version" >"$dir/bin/Runner.Listener"
+chmod +x "$dir/config.sh" "$dir/svc.sh" "$dir/bin/Runner.Listener"

@@ -11,11 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck gh-runners
+        run: shellcheck -x gh-runners tests/test_*.sh tests/mock/*
       - name: tests
         run: |
-          python3 tests/test_gh_runners.py
-          python3 tests/test_local.py
+          bash tests/test_gh_runners.sh
+          bash tests/test_local.sh
 
   nix:
     runs-on: ubuntu-latest

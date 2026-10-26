@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Mock gh for test_gh_runners.sh (linked as gh): logs its arguments and answers read-only calls from fixtures.
+printf '%s\0' "$@" | jq -sRc 'split("\u0000")[:-1]' >>"$TEST_LOG"
+scenario=${TEST_SCENARIO:-normal}
+
+# gh --jq FILTER: apply FILTER to stdin, as gh does (--paginate applies it per page).
+apply_jq() {
+  local prev=
+  for arg in "$@"; do
+    [[ $prev == --jq ]] && exec jq -r "$arg"
+    prev=$arg
+  done
+  echo "mock gh: no --jq in $*" >&2
+  exit 2
+}
+
+if [[ $1 == repo && $2 == view ]]; then
+  if [[ $scenario == no-repo ]]; then
+    echo "no git remotes found" >&2
+    exit 1
+  fi
+  apply_jq "$@" <<<'{"nameWithOwner": "cur/repo"}'
+fi
+if [[ $scenario == failure && $* == *forbidden/repo* ]]; then
+  echo "HTTP 403: forbidden" >&2
+  exit 1
+fi
+if [[ $1 == api ]]; then
+  [[ $2 == --method && $3 == GET && $4 == --paginate ]] || { echo "mock gh: not a paginated GET: $*" >&2; exit 2; }
+  if [[ $scenario == empty ]]; then
+    apply_jq "$@" <<<'{"runners": []}'
+  fi
+  apply_jq "$@" <<'JSON'
+{"runners": [
+  {"name": "runner-a", "status": "online", "busy": true, "labels": [{"name": "self-hosted"}, {"name": "macos"}]},
+  {"name": "runner-b", "status": "offline", "busy": false, "labels": []}]}
+JSON
+elif [[ $1 == run && $2 == list ]]; then
+  if [[ $scenario == empty ]]; then
+    apply_jq "$@" <<<'[]'
+  fi
+  apply_jq "$@" <<'JSON'
+[{"databaseId": 42, "status": "completed", "conclusion": "success", "workflowName": "CI",
+  "displayTitle": "Build", "headBranch": "main", "createdAt": "2026-10-26T00:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/42"}]
+JSON
+fi
+echo "mock gh: unexpected or mutating command: $*" >&2
+exit 2
