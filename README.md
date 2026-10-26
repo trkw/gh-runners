@@ -104,6 +104,10 @@ If unregistering fails (the removal token or `config.sh remove`), it stops there
 
 Runners usually update themselves, but `upgrade` brings a stopped or stuck one to the latest release: it stops a running service, unpacks the release over the directory and starts it again.
 
+## Raycast
+
+[raycast-extension-gh-runners](https://github.com/trkw/raycast-extension-gh-runners) shows `local`, `list` and `runs` in [Raycast](https://www.raycast.com/) through `--json`, with start / stop / restart / upgrade actions for the runners on this Mac.
+
 ## Nix
 
 The flake provides the extension as a package, for Home Manager's `programs.gh.extensions`:
