@@ -147,6 +147,18 @@ class LocalTests(unittest.TestCase):
         self.assertIn("Some GitHub states could not be read", result.stderr)
         self.assertIn("host-app\torg/app\tstopped\t?", result.stdout)
 
+    def test_local_json(self):
+        result = self.run_cli("local", "--json", TEST_RUNNING="actions.runner.dotfiles")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {r["name"]: r for r in json.loads(result.stdout)}
+        self.assertEqual(rows["host-dotfiles"], {
+            "name": "host-dotfiles", "repository": "me/dotfiles", "service": "running",
+            "status": "online", "busy": True, "version": "2.300.0", "dir": str(self.dots)})
+        self.assertEqual(rows["host-app"]["status"], "offline")
+        result = self.run_cli("local", "--json", TEST_SCENARIO="api-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual({r["status"] for r in json.loads(result.stdout)}, {None})
+
     def test_select_by_name_repo_alias_and_dir(self):
         for sel in ("host-dotfiles", "me/dotfiles", "dots", str(self.dots)):
             self.log.unlink(missing_ok=True)

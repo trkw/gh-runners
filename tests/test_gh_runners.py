@@ -136,6 +136,38 @@ class GhRunnersTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Unknown command or alias: lst", result.stderr)
 
+    def test_json(self):
+        result = self.run_cli("list", "--json", "corp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            {"repository": "example/corp", "name": "runner-a", "status": "online", "busy": True,
+             "labels": ["self-hosted", "macos"]},
+            {"repository": "example/corp", "name": "runner-b", "status": "offline", "busy": False,
+             "labels": []}])
+        result = self.run_cli("runs", "dots", "5", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            {"repository": "example/dots", "id": 42, "status": "completed", "conclusion": "success",
+             "workflow": "CI", "title": "Build", "branch": "main", "createdAt": "2026-10-26T00:00:00Z",
+             "url": "https://github.com/o/r/actions/runs/42"}])
+        result = self.run_cli("aliases", "--json")
+        self.assertEqual(json.loads(result.stdout)[0], {"alias": "corp", "repository": "example/corp"})
+        result = self.run_cli("--json", "corp", TEST_SCENARIO="empty")
+        self.assertEqual(json.loads(result.stdout), [])
+
+    def test_json_with_a_failing_repo_is_still_one_array(self):
+        result = self.run_cli("list", "all", "--json", TEST_SCENARIO="failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot read forbidden/repo", result.stderr)
+        rows = json.loads(result.stdout)
+        self.assertEqual(sorted({r["repository"] for r in rows}), ["example/corp", "example/dots"])
+
+    def test_json_rejected_by_other_commands(self):
+        result = self.run_cli("add", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--json works with", result.stderr)
+        self.assertEqual(self.calls(), [])
+
     def test_all_uses_every_alias(self):
         result = self.run_cli("list", "all")
         self.assertEqual(result.returncode, 0, result.stderr)
