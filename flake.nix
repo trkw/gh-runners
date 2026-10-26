@@ -21,9 +21,15 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          default = pkgs.writeShellApplication {
-            name = "gh-runners";
-            text = builtins.readFile ./gh-runners;
+          # Home Manager's programs.gh.extensions needs pname, so this is a plain derivation.
+          default = pkgs.stdenvNoCC.mkDerivation {
+            pname = "gh-runners";
+            version = "0.1.0";
+            src = ./.;
+            dontBuild = true;
+            installPhase = ''
+              install -Dm755 gh-runners $out/bin/gh-runners
+            '';
             meta = {
               description = "gh extension to watch and register self-hosted GitHub Actions runners";
               license = pkgs.lib.licenses.mit;
